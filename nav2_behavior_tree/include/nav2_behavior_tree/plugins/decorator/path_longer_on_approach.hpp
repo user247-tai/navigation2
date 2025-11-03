@@ -26,10 +26,17 @@
 #include "nav2_behavior_tree/bt_utils.hpp"
 #include "nav2_behavior_tree/json_utils.hpp"
 #include "rclcpp/rclcpp.hpp"
+#include "nav2_msgs/msg/node_signal.hpp"
+#include "nav2_msgs/msg/warning_command.hpp"
+#include "nav2_msgs/srv/is_path_valid.hpp"
+#include "nav2_util/service_client.hpp"
+
 
 namespace nav2_behavior_tree
 {
 
+using NodeSignal = nav2_msgs::msg::NodeSignal;
+using WarningCommand = nav2_msgs::msg::WarningCommand;
 /**
  * @brief A BT::DecoratorNode that ticks its child every time when the length of
  * the new path is smaller than the old one by the length given by the user.
@@ -63,6 +70,7 @@ public:
       BT::InputPort<double>(
         "length_factor", 2.0,
         "Length multiplication factor to check if the path is significantly longer"),
+      BT::InputPort<std::chrono::milliseconds>("server_timeout"),
     };
   }
 
@@ -111,7 +119,18 @@ private:
   double prox_len_ = std::numeric_limits<double>::max();
   double length_factor_ = std::numeric_limits<double>::max();
   rclcpp::Node::SharedPtr node_;
+  rclcpp::Publisher<NodeSignal>::SharedPtr signal_pub_;
+  rclcpp::Publisher<WarningCommand>::SharedPtr warning_cmd_pub_;
   bool first_time_ = true;
+  bool current_signal_state_ = false;
+  bool warning_cmd_sent_ = false;
+  nav2_util::ServiceClient<nav2_msgs::srv::IsPathValid>::SharedPtr client_;
+  // The timeout value while waiting for a response from the
+  // is path valid service
+  std::chrono::milliseconds server_timeout_;
+  unsigned int max_cost_ = 253;
+  bool consider_unknown_as_obstacle_ = false;
+  bool is_current_path_valid_ = true;
 };
 
 }  // namespace nav2_behavior_tree

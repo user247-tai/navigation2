@@ -17,9 +17,16 @@
 
 #include <string>
 #include "behaviortree_cpp/control_node.h"
+#include "rclcpp/rclcpp.hpp"
+#include "nav2_msgs/msg/node_signal.hpp"
+#include "nav2_msgs/msg/warning_command.hpp"
 
 namespace nav2_behavior_tree
 {
+
+using NodeSignal = nav2_msgs::msg::NodeSignal;
+using WarningCommand = nav2_msgs::msg::WarningCommand;
+
 /**
  * @brief The RecoveryNode has only two children and returns SUCCESS if and only if the first child
  * returns SUCCESS.
@@ -64,6 +71,10 @@ private:
   unsigned int current_child_idx_;
   unsigned int number_of_retries_;
   unsigned int retry_count_;
+
+  rclcpp::Node::SharedPtr node_;
+  rclcpp::Publisher<NodeSignal>::SharedPtr node_status_pub_;
+  rclcpp::Publisher<WarningCommand>::SharedPtr warning_cmd_pub_;
 
   /**
    * @brief The main override required by a BT action

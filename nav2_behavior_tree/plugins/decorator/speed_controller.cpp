@@ -52,6 +52,44 @@ SpeedController::SpeedController(
 
   odom_smoother_ = config().blackboard->get<std::shared_ptr<nav2_util::OdomSmoother>>(
     "odom_smoother");
+
+  tf_buffer_ = std::make_shared<tf2_ros::Buffer>(node_->get_clock());
+  tf_listener_ = std::make_shared<tf2_ros::TransformListener>(*tf_buffer_);
+
+  callback_group_ = node_->create_callback_group(rclcpp::CallbackGroupType::MutuallyExclusive, false);
+
+  callback_group_executor_.add_callback_group(callback_group_, node_->get_node_base_interface());
+
+  timer_ = node_->create_wall_timer(
+      std::chrono::milliseconds(100),
+      std::bind(&SpeedController::onTimer, this),
+      callback_group_);
+      
+  start_pose_process_ = false;
+  release_ = false;
+
+  callback_group_executor_.spin_some(std::chrono::nanoseconds(1));
+
+}
+
+void SpeedController::onTimer() {
+  try {
+    geometry_msgs::msg::TransformStamped t =
+      tf_buffer_->lookupTransform("map", "base_link", tf2::TimePointZero);
+
+    current_x_ = t.transform.translation.x;
+    current_y_ = t.transform.translation.y;
+    geometry_msgs::msg::Quaternion q_msg = t.transform.rotation;
+    tf2::Quaternion q;
+    tf2::fromMsg(q_msg, q);
+    double roll = 0.0, pitch = 0.0, yaw = 0.0;
+    tf2::Matrix3x3(q).getRPY(roll, pitch, yaw);
+    current_z_ = yaw;
+    // RCLCPP_INFO(this->node_->get_logger(), "Current x: %f, Current y: %f, Current z: %f", this->current_x_, this->current_y_, this->current_z_);
+
+  } catch (const tf2::TransformException &ex) {
+    RCLCPP_WARN(node_->get_logger(), "TF lookup failed: %s", ex.what());
+  }
 }
 
 inline BT::NodeStatus SpeedController::tick()
@@ -65,6 +103,8 @@ inline BT::NodeStatus SpeedController::tick()
     start_ = node_->now();
     first_tick_ = true;
   }
+
+  callback_group_executor_.spin_some();
 
   nav_msgs::msg::Goals current_goals;
   BT::getInputOrBlackboard("goals", current_goals);
@@ -90,10 +130,43 @@ inline BT::NodeStatus SpeedController::tick()
   if (first_tick_ || (child_node_->status() == BT::NodeStatus::RUNNING) ||
     elapsed.seconds() >= period_)
   {
-    first_tick_ = false;
 
+    if (first_tick_ == true){
+      try {
+        geometry_msgs::msg::TransformStamped t = tf_buffer_->lookupTransform("map", "base_link", tf2::TimePointZero);
+        current_x_ = t.transform.translation.x;
+        current_y_ = t.transform.translation.y;
+        geometry_msgs::msg::Quaternion q_msg = t.transform.rotation;
+        tf2::Quaternion q;
+        tf2::fromMsg(q_msg, q);
+        double roll = 0.0, pitch = 0.0, yaw = 0.0;
+        tf2::Matrix3x3(q).getRPY(roll, pitch, yaw);
+        current_z_ = yaw;
+        RCLCPP_INFO(this->node_->get_logger(), "Init x: %f, Init y: %f, Init z: %f", current_x_, current_y_, current_z_);
+      } catch (const tf2::TransformException &ex) {
+        RCLCPP_WARN(this->node_->get_logger(), "TF lookup failed: %s", ex.what());
+      }
+      start_pose_process_ = true;
+      release_ = false;
+    }
+
+    first_tick_ = false;
+    
     // update period if the last period is exceeded
     if (elapsed.seconds() >= period_) {
+      if (start_pose_process_ == true){
+        if (!canSeeGoal(current_x_, current_y_, current_z_, goal_.pose.position.x, goal_.pose.position.y))
+        {
+          updatePeriod();
+          //RCLCPP_INFO(node_->get_logger(), "DEBUG: Robot cant see goal, waiting more 0.25s before planning");
+          return BT::NodeStatus::RUNNING;
+        } 
+        else
+        {
+          release_ = true;
+          //RCLCPP_INFO(node_->get_logger(), "DEBUG: Robot can see goal, update period now");
+        }
+      }
       updatePeriod();
       start_ = node_->now();
     }
@@ -103,6 +176,7 @@ inline BT::NodeStatus SpeedController::tick()
 
   return status();
 }
+
 
 }  // namespace nav2_behavior_tree
 

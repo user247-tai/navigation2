@@ -405,6 +405,17 @@
 
     <Control ID="RoundRobin"/>
 
+    <Control ID="NonblockingSequence"/>
+
+    <Control ID="PauseResumeController">
+      <input_port name="pause_service_name">Service to call to pause</input_port>
+      <input_port name="resume_service_name">Service to call to resume</input_port>
+    </Control>
+
+    <Control ID="PersistentSequence">
+      <bidirectional_port name="current_child_idx">Index of the child to execute</bidirectional_port>
+    </Control>
+
     <!-- ############################### DECORATOR NODES ############################## -->
     <Decorator ID="RateController">
       <input_port name="hz">Rate</input_port>
@@ -439,11 +450,18 @@
       <input_port name="path">Planned Path</input_port>
       <input_port name="prox_len">Proximity length (m) for the path to be longer on approach</input_port>
       <input_port name="length_factor">Length multiplication factor to check if the path is significantly longer </input_port>
+      <input_port name="server_timeout">Server timeout</input_port>
     </Decorator>
 
     <Decorator ID="GoalUpdatedController">
       <input_port name="goal">Vector of navigation goals</input_port>
       <input_port name="goals">Navigation goal</input_port>
+    </Decorator>
+
+    <Decorator ID="GoalReachedController">
+      <input_port name="goal">Destination</input_port>
+      <input_port name="robot_base_frame">Robot base frame</input_port>
+      <input_port name="tolerance">Goal reached tolerance</input_port>
     </Decorator>
 
   </TreeNodesModel>

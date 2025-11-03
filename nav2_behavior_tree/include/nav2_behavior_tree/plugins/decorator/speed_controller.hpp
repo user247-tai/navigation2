@@ -27,6 +27,11 @@
 #include "nav2_util/odometry_utils.hpp"
 #include "nav2_behavior_tree/bt_utils.hpp"
 #include "nav2_behavior_tree/json_utils.hpp"
+#include "tf2_ros/transform_listener.h"
+#include "tf2_ros/buffer.h"
+#include "tf2/LinearMath/Quaternion.hpp"
+#include "tf2/LinearMath/Matrix3x3.hpp"
+#include "tf2_geometry_msgs/tf2_geometry_msgs.hpp"
 
 
 namespace nav2_behavior_tree
@@ -81,6 +86,23 @@ private:
   BT::NodeStatus tick() override;
 
   /**
+   * @brief Calculate euclid distance of 2 pose in 2D map
+   * @return float euclid distance value
+   */
+
+  inline bool canSeeGoal(float x1, float y1, float yaw, float x2, float y2, float threshold = M_PI){
+    float dx = x2 - x1;
+    float dy = y2 - y1;
+    float goal_heading = std::atan2(dy, dx);
+    
+    float diff = goal_heading - yaw;
+    while (diff > M_PI)  diff -= 2.0 * M_PI;
+    while (diff < -M_PI) diff += 2.0 * M_PI;
+
+    return std::fabs(diff) <= (threshold / 2.0f);
+  }
+
+  /**
    * @brief Scale the rate based speed
    * @return double Rate scaled by speed limits and clamped
    */
@@ -97,14 +119,39 @@ private:
    */
   inline void updatePeriod()
   {
+    if (start_pose_process_ == true && release_ == false){
+      if (period_ >= 10.0){
+        //RCLCPP_INFO(node_->get_logger(), "DEBUG: Haven't release yet but timeout, force release now!");
+        release_ = true;
+        start_pose_process_ = false;
+        period_ = 0.0;
+        return;
+      }
+      //RCLCPP_INFO(node_->get_logger(), "DEBUG: Haven't release yet, increase period to 0.25s");
+      period_ += 0.25;
+    }
+    else if (start_pose_process_ == true && release_ == true){
+      //RCLCPP_INFO(node_->get_logger(), "DEBUG: Released, start replanning now");
+      start_pose_process_ = false;
+      //Request update period immediately
+      period_ = 0.0;
+    }
+    else{
     auto velocity = odom_smoother_->getTwist();
     double speed = std::hypot(velocity.linear.x, velocity.linear.y);
     double rate = getScaledRate(speed);
     period_ = 1.0 / rate;
+    }
   }
 
-  rclcpp::Node::SharedPtr node_;
+  void onTimer();
 
+  rclcpp::Node::SharedPtr node_;
+  std::shared_ptr<tf2_ros::Buffer> tf_buffer_;  
+  std::shared_ptr<tf2_ros::TransformListener> tf_listener_;  
+  rclcpp::CallbackGroup::SharedPtr callback_group_;
+  rclcpp::executors::SingleThreadedExecutor callback_group_executor_;
+  rclcpp::TimerBase::SharedPtr timer_;
   // To keep track of time to reset
   rclcpp::Time start_;
 
@@ -112,6 +159,8 @@ private:
   std::shared_ptr<nav2_util::OdomSmoother> odom_smoother_;
 
   bool first_tick_;
+  bool start_pose_process_;
+  bool release_;
 
   // Time period after which child node should be ticked
   double period_;
@@ -125,6 +174,13 @@ private:
   double min_speed_;
   double max_speed_;
   double d_speed_;
+
+  // Current position
+  double current_x_;
+  double current_y_;
+  double current_z_;
+
+  double transform_tolerance_;
 
   // current goal
   geometry_msgs::msg::PoseStamped goal_;

@@ -27,7 +27,7 @@ IsPoseOccupiedCondition::IsPoseOccupiedCondition(
   use_footprint_(true), consider_unknown_as_obstacle_(false), cost_threshold_(254),
   service_name_("global_costmap/get_cost_global_costmap")
 {
-  node_ = config().blackboard->get<nav2::LifecycleNode::SharedPtr>("node");
+  node_ = config().blackboard->get<rclcpp::Node::SharedPtr>("node");
   server_timeout_ = config().blackboard->template get<std::chrono::milliseconds>("server_timeout");
 }
 
@@ -38,10 +38,8 @@ void IsPoseOccupiedCondition::initialize()
   getInput<bool>("use_footprint", use_footprint_);
   getInput<bool>("consider_unknown_as_obstacle", consider_unknown_as_obstacle_);
   getInput<std::chrono::milliseconds>("server_timeout", server_timeout_);
-  client_ =
-    node_->create_client<nav2_msgs::srv::GetCosts>(
-    service_name_,
-    false /* Does not create and spin an internal executor*/);
+  client_ = std::make_shared<nav2_util::ServiceClient<nav2_msgs::srv::GetCosts>>(service_name_,
+      node_, false /* Does not create and spin an internal executor*/);
 }
 
 BT::NodeStatus IsPoseOccupiedCondition::tick()
