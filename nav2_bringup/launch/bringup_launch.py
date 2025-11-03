@@ -37,6 +37,7 @@ def generate_launch_description() -> LaunchDescription:
     map_yaml_file = LaunchConfiguration('map')
     keepout_mask_yaml_file = LaunchConfiguration('keepout_mask')
     speed_mask_yaml_file = LaunchConfiguration('speed_mask')
+    binary_mask_yaml_file = LaunchConfiguration('binary_mask')
     graph_filepath = LaunchConfiguration('graph')
     use_sim_time = LaunchConfiguration('use_sim_time')
     params_file = LaunchConfiguration('params_file')
@@ -47,6 +48,7 @@ def generate_launch_description() -> LaunchDescription:
     use_localization = LaunchConfiguration('use_localization')
     use_keepout_zones = LaunchConfiguration('use_keepout_zones')
     use_speed_zones = LaunchConfiguration('use_speed_zones')
+    use_binary_zones = LaunchConfiguration('use_binary_zones')
 
     # Map fully qualified names to relative ones so the node's namespace can be prepended.
     remappings = [('/tf', 'tf'), ('/tf_static', 'tf_static')]
@@ -54,6 +56,7 @@ def generate_launch_description() -> LaunchDescription:
     yaml_substitutions = {
         'KEEPOUT_ZONE_ENABLED': use_keepout_zones,
         'SPEED_ZONE_ENABLED': use_speed_zones,
+        'BINARY_ZONE_ENABLED': use_binary_zones,
     }
 
     configured_params = ParameterFile(
@@ -93,6 +96,11 @@ def generate_launch_description() -> LaunchDescription:
         description='Full path to speed mask yaml file to load'
     )
 
+    declare_binary_mask_yaml_cmd = DeclareLaunchArgument(
+        'binary_mask', default_value='',
+        description='Full path to binary mask yaml file to load'
+    )
+
     declare_graph_file_cmd = DeclareLaunchArgument(
         'graph',
         default_value='', description='Path to the graph file to load'
@@ -110,6 +118,11 @@ def generate_launch_description() -> LaunchDescription:
 
     declare_use_speed_zones_cmd = DeclareLaunchArgument(
         'use_speed_zones', default_value='True',
+        description='Whether to enable speed zones or not'
+    )
+
+    declare_use_binary_zones_cmd = DeclareLaunchArgument(
+        'use_binary_zones', default_value='True',
         description='Whether to enable speed zones or not'
     )
 
@@ -225,6 +238,22 @@ def generate_launch_description() -> LaunchDescription:
 
             IncludeLaunchDescription(
                 PythonLaunchDescriptionSource(
+                    os.path.join(launch_dir, 'binary_zone_launch.py')
+                ),
+                condition=IfCondition(PythonExpression([use_binary_zones])),
+                launch_arguments={
+                    'namespace': namespace,
+                    'binary_mask': binary_mask_yaml_file,
+                    'use_sim_time': use_sim_time,
+                    'params_file': params_file,
+                    'use_composition': use_composition,
+                    'use_respawn': use_respawn,
+                    'container_name': 'nav2_container',
+                }.items(),
+            ),
+
+            IncludeLaunchDescription(
+                PythonLaunchDescriptionSource(
                     os.path.join(launch_dir, 'navigation_launch.py')
                 ),
                 launch_arguments={
@@ -253,6 +282,7 @@ def generate_launch_description() -> LaunchDescription:
     ld.add_action(declare_map_yaml_cmd)
     ld.add_action(declare_keepout_mask_yaml_cmd)
     ld.add_action(declare_speed_mask_yaml_cmd)
+    ld.add_action(declare_binary_mask_yaml_cmd)
     ld.add_action(declare_graph_file_cmd)
     ld.add_action(declare_use_sim_time_cmd)
     ld.add_action(declare_params_file_cmd)
@@ -263,6 +293,8 @@ def generate_launch_description() -> LaunchDescription:
     ld.add_action(declare_use_localization_cmd)
     ld.add_action(declare_use_keepout_zones_cmd)
     ld.add_action(declare_use_speed_zones_cmd)
+    ld.add_action(declare_use_binary_zones_cmd)
+
 
     # Add the actions to launch all of the navigation nodes
     ld.add_action(bringup_cmd_group)
