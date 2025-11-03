@@ -1,0 +1,101 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<root BTCPP_format="4">
+  <BehaviorTree ID="MainTree">
+    <ReactiveSequence>
+      <Fallback>
+        <Inverter>
+          <GlobalUpdatedGoal goal="{goal}"/>
+        </Inverter>
+        <Script code="goal_reached := 0"/>
+      </Fallback>
+      <Parallel failure_count="1"
+                success_count="-1">
+        <GoalReachedController goal="{goal}"
+                               tolerance="0.25">
+          <RetryUntilSuccessful num_attempts="60">
+            <Delay delay_msec="500">
+              <Switch2 case_1="0"
+                       case_2="1"
+                       variable="{goal_reached}">
+                <AlwaysFailure/>
+                <AlwaysSuccess/>
+                <AlwaysSuccess/>
+              </Switch2>
+            </Delay>
+          </RetryUntilSuccessful>
+        </GoalReachedController>
+        <RecoveryNode name="NavigateRecovery"
+                      number_of_retries="6">
+          <PipelineSequence name="NavigateWithReplanning">
+            <ControllerSelector topic_name="controller_selector"
+                                default_controller="FollowPath"
+                                selected_controller="{selected_controller}"/>
+            <PlannerSelector topic_name="planner_selector"
+                             default_planner="GridBased"
+                             selected_planner="{selected_planner}"/>
+            <SpeedController min_rate="2.0"
+                             max_rate="2.0"
+                             min_speed="0.0"
+                             max_speed="0.3">
+              <RecoveryNode name="ComputePathToPose"
+                            number_of_retries="1">
+                <Sequence>
+                  <ComputePathToPose goal="{goal}"
+                                     planner_id="{selected_planner}"
+                                     path="{path}"
+                                     error_code_id="{compute_path_error_code}"/>
+                  <SmoothPath smoother_id="simple_smoother"
+                              unsmoothed_path="{path}"
+                              check_for_collisions="false"
+                              smoothed_path="{smooth_path}"
+                              error_code_id="{smooth_path_error_code}"/>
+                </Sequence>
+                <ClearEntireCostmap name="ClearGlobalCostmap-Context"
+                                    service_name="global_costmap/clear_entirely_global_costmap"/>
+              </RecoveryNode>
+            </SpeedController>
+            <ReactiveSequence name="MonitorAndFollowPath">
+              <RecoveryNode name="CheckGoalOccupied"
+                            number_of_retries="30">
+                <Inverter>
+                  <IsPoseOccupied pose="{goal}"
+                                  cost_threshold="200"
+                                  use_footprint="false"/>
+                </Inverter>
+                <SequenceWithMemory name="CancelingControlAndWait">
+                  <CancelControl name="ControlCancel"/>
+                  <ClearEntireCostmap name="ClearGlobalCostmap-Context"
+                                      service_name="global_costmap/clear_entirely_global_costmap"/>
+                  <Wait wait_duration="1.0"/>
+                </SequenceWithMemory>
+              </RecoveryNode>
+              <PathLongerOnApproach path="{path}"
+                                    prox_len="1000000"
+                                    length_factor="1.01">
+                <RetryUntilSuccessful num_attempts="1">
+                  <SequenceWithMemory name="CancelingControlAndWait">
+                    <CancelControl name="ControlCancel"/>
+                    <Wait wait_duration="10.0"/>
+                  </SequenceWithMemory>
+                </RetryUntilSuccessful>
+              </PathLongerOnApproach>
+              <Sequence>
+                <RecoveryNode name="FollowPath"
+                              number_of_retries="1">
+                  <FollowPath controller_id="{selected_controller}"
+                              path="{smooth_path}"
+                              error_code_id="{follow_path_error_code}"/>
+                  <ClearEntireCostmap name="ClearLocalCostmap-Context"
+                                      service_name="local_costmap/clear_entirely_local_costmap"/>
+                </RecoveryNode>
+                <Script code="goal_reached := 1"/>
+              </Sequence>
+            </ReactiveSequence>
+          </PipelineSequence>
+          <Wait wait_duration="1.0"/>
+        </RecoveryNode>
+      </Parallel>
+    </ReactiveSequence>
+  </BehaviorTree>
+
+</root>

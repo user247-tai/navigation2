@@ -1,0 +1,49 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<root BTCPP_format="4"
+      main_tree_to_execute="MainTree">
+  <BehaviorTree ID="MainTree">
+    <ReactiveSequence>
+      <Fallback>
+        <Inverter>
+          <GlobalUpdatedGoal goal="{goal}"/>
+        </Inverter>
+        <Script code="goal_reached := 0"/>
+      </Fallback>
+      <Parallel failure_count="1"
+                success_count="-1">
+        <GoalReachedController goal="{goal}"
+                               tolerance="2.0">
+          <RetryUntilSuccessful num_attempts="40">
+            <Delay delay_msec="500">
+              <Switch2 case_1="0"
+                       case_2="1"
+                       variable="{goal_reached}">
+                <AlwaysFailure/>
+                <AlwaysSuccess/>
+                <AlwaysSuccess/>
+              </Switch2>
+            </Delay>
+          </RetryUntilSuccessful>
+        </GoalReachedController>
+        <PipelineSequence name="NavigateWithReplanning">
+          <GoalUpdatedController>
+            <ComputePathToPose goal="{goal}"
+                               planner_id="{selected_planner}"
+                               path="{path}"
+                               error_code_id="{compute_path_error_code}"
+                               error_msg="{compute_path_error_msg}"/>
+          </GoalUpdatedController>
+          <Sequence>
+            <FollowPath controller_id="{selected_controller}"
+                        path="{path}"
+                        error_code_id="{follow_path_error_code}"
+                        error_msg="{follow_path_error_msg}"/>
+            <Script code="goal_reached := 1"/>
+          </Sequence>
+        </PipelineSequence>
+      </Parallel>
+    </ReactiveSequence>
+  </BehaviorTree>
+
+
+</root>

@@ -1,12 +1,5 @@
-
-<!--
-  This BT has all the functionalities of navigate_to_pose_w_replanning_and_recovery.xml,
-  with an additional feature to cancel the control closer to the goal proximity and
-  make the robot wait for a specific time, to see if the obstacle clears out before
-  navigating along a significantly longer path to reach the goal location.
--->
-<root BTCPP_format="4"
-      main_tree_to_execute="MainTree">
+<?xml version="1.0" encoding="UTF-8"?>
+<root BTCPP_format="4">
   <BehaviorTree ID="MainTree">
     <RecoveryNode name="NavigateRecovery"
                   number_of_retries="6">
@@ -17,26 +10,42 @@
         <PlannerSelector topic_name="planner_selector"
                          default_planner="GridBased"
                          selected_planner="{selected_planner}"/>
-        <SpeedController min_rate="1.0"
+        <SpeedController min_rate="2.0"
                          max_rate="2.0"
                          min_speed="0.0"
-                         max_speed="0.4">
+                         max_speed="0.3">
           <RecoveryNode name="ComputePathToPose"
                         number_of_retries="1">
-            <Fallback>
-              <GoalReached goal="{goal}"/>
+            <Sequence>
               <ComputePathToPose goal="{goal}"
-                                 planner_id="{selected_planner}"
-                                 path="{path}"
-                                 error_code_id="{compute_path_error_code}"/>
-            </Fallback>
+                                  planner_id="{selected_planner}"
+                                  path="{path}"
+                                  error_code_id="{compute_path_error_code}"/>
+              <SmoothPath smoother_id="simple_smoother"
+                          unsmoothed_path="{path}"
+                          check_for_collisions="false"
+                          smoothed_path="{smooth_path}"
+                          error_code_id="{smooth_path_error_code}"/>
+              <RecoveryNode name="CheckGoalOccupied"
+                            number_of_retries="1">
+                <Inverter>
+                  <IsPoseOccupied pose="{goal}"
+                                  cost_threshold="230"
+                                  use_footprint="false"/>
+                </Inverter>
+                <SequenceWithMemory name="CancelingControlAndWait">
+                  <CancelControl name="ControlCancel"/>
+                  <Wait wait_duration="1.0"/>
+                </SequenceWithMemory>
+              </RecoveryNode>
+            </Sequence>
             <ClearEntireCostmap name="ClearGlobalCostmap-Context"
                                 service_name="global_costmap/clear_entirely_global_costmap"/>
           </RecoveryNode>
         </SpeedController>
         <ReactiveSequence name="MonitorAndFollowPath">
           <PathLongerOnApproach path="{path}"
-                                prox_len="100000"
+                                prox_len="1000000"
                                 length_factor="1.01">
             <RetryUntilSuccessful num_attempts="1">
               <SequenceWithMemory name="CancelingControlAndWait">
@@ -48,7 +57,7 @@
           <RecoveryNode name="FollowPath"
                         number_of_retries="1">
             <FollowPath controller_id="{selected_controller}"
-                        path="{path}"
+                        path="{smooth_path}"
                         error_code_id="{follow_path_error_code}"/>
             <ClearEntireCostmap name="ClearLocalCostmap-Context"
                                 service_name="local_costmap/clear_entirely_local_costmap"/>
