@@ -39,8 +39,14 @@ def generate_launch_description() -> LaunchDescription:
     container_name_full = (namespace, '/', container_name)
     use_respawn = LaunchConfiguration('use_respawn')
     log_level = LaunchConfiguration('log_level')
+    localizer = LaunchConfiguration('localizer')  # 'amcl' or 'neo'
 
-    lifecycle_nodes = ['map_server', 'amcl']
+    use_amcl = EqualsSubstitution(localizer, 'amcl')
+    use_neo  = EqualsSubstitution(localizer, 'neo')
+
+
+    amcl_lifecycle_nodes = ['map_server', 'amcl']
+    neo_lifecycle_nodes = ['map_server', 'neo_localization']
 
     # Map fully qualified names to relative ones so the node's namespace can be prepended.
     remappings = [('/tf', 'tf'), ('/tf_static', 'tf_static')]
@@ -107,6 +113,11 @@ def generate_launch_description() -> LaunchDescription:
         'log_level', default_value='info', description='log level'
     )
 
+    declare_localizer_cmd = DeclareLaunchArgument(
+        'localizer', default_value='neo',
+        description="Localization node to use: 'amcl' or 'neo'"
+    )
+
     load_nodes = GroupAction(
         condition=IfCondition(PythonExpression(['not ', use_composition])),
         actions=[
@@ -140,6 +151,7 @@ def generate_launch_description() -> LaunchDescription:
                 remappings=remappings,
             ),
             Node(
+                condition=IfCondition(use_amcl),
                 package='nav2_amcl',
                 executable='amcl',
                 name='amcl',
@@ -151,12 +163,34 @@ def generate_launch_description() -> LaunchDescription:
                 remappings=remappings,
             ),
             Node(
+                condition=IfCondition(use_neo),
+                package='nav2_neo_localization',
+                executable='neo_localization',
+                name='neo_localization',
+                output='screen',
+                respawn=use_respawn,
+                respawn_delay=2.0,
+                parameters=[configured_params],
+                arguments=['--ros-args', '--log-level', log_level],
+                remappings=remappings,
+            ),
+            Node(
+                condition=IfCondition(use_amcl),
                 package='nav2_lifecycle_manager',
                 executable='lifecycle_manager',
                 name='lifecycle_manager_localization',
                 output='screen',
                 arguments=['--ros-args', '--log-level', log_level],
-                parameters=[{'autostart': autostart}, {'node_names': lifecycle_nodes}],
+                parameters=[{'autostart': autostart}, {'node_names': amcl_lifecycle_nodes}],
+            ),
+            Node(
+                condition=IfCondition(use_neo),
+                package='nav2_lifecycle_manager',
+                executable='lifecycle_manager',
+                name='lifecycle_manager_localization',
+                output='screen',
+                arguments=['--ros-args', '--log-level', log_level],
+                parameters=[{'autostart': autostart}, {'node_names': neo_lifecycle_nodes}],
             ),
         ],
     )
@@ -203,6 +237,7 @@ def generate_launch_description() -> LaunchDescription:
                 ],
             ),
             LoadComposableNodes(
+                condition=IfCondition(use_amcl),
                 target_container=container_name_full,
                 composable_node_descriptions=[
                     ComposableNode(
@@ -217,7 +252,28 @@ def generate_launch_description() -> LaunchDescription:
                         plugin='nav2_lifecycle_manager::LifecycleManager',
                         name='lifecycle_manager_localization',
                         parameters=[
-                            {'autostart': autostart, 'node_names': lifecycle_nodes}
+                            {'autostart': autostart, 'node_names': amcl_lifecycle_nodes}
+                        ],
+                    ),
+                ],
+            ),
+            LoadComposableNodes(
+                condition=IfCondition(use_neo),
+                target_container=container_name_full,
+                composable_node_descriptions=[
+                    ComposableNode(
+                        package='nav2_neo_localization',
+                        plugin='nav2_neo_localization::NeoLocalizationNode',
+                        name='neo_localization',
+                        parameters=[configured_params],
+                        remappings=remappings,
+                    ),
+                    ComposableNode(
+                        package='nav2_lifecycle_manager',
+                        plugin='nav2_lifecycle_manager::LifecycleManager',
+                        name='lifecycle_manager_localization',
+                        parameters=[
+                            {'autostart': autostart, 'node_names': neo_lifecycle_nodes}
                         ],
                     ),
                 ],
@@ -245,5 +301,6 @@ def generate_launch_description() -> LaunchDescription:
     # Add the actions to launch all of the localiztion nodes
     ld.add_action(load_nodes)
     ld.add_action(load_composable_nodes)
+    ld.add_action(declare_localizer_cmd)
 
     return ld
