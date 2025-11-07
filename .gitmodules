@@ -1,0 +1,3 @@
+[submodule "nav2_neo_localization"]
+	path = nav2_neo_localization
+	url = https://github.com/user247-tai/nav2_neo_localization.git
