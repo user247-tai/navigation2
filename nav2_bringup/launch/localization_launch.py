@@ -297,10 +297,10 @@ def generate_launch_description() -> LaunchDescription:
     ld.add_action(declare_container_name_cmd)
     ld.add_action(declare_use_respawn_cmd)
     ld.add_action(declare_log_level_cmd)
+    ld.add_action(declare_localizer_cmd)
 
     # Add the actions to launch all of the localiztion nodes
     ld.add_action(load_nodes)
     ld.add_action(load_composable_nodes)
-    ld.add_action(declare_localizer_cmd)
 
     return ld
