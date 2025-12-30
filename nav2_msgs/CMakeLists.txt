@@ -70,6 +70,7 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "action/UndockRobot.action"
   "action/ComputeRoute.action"
   "action/ComputeAndTrackRoute.action"
+  "action/CoverAllMap.action"
   DEPENDENCIES builtin_interfaces geometry_msgs std_msgs action_msgs nav_msgs geographic_msgs
 )
 

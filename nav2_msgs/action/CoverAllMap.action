@@ -1,0 +1,22 @@
+#goal definition
+string order_mode "rows"
+---
+#result definition
+
+# Error codes
+uint16 NONE=0
+uint16 UNKNOWN=400
+uint16 FAIL_TO_PLAN=401
+uint16 FAIL_TO_FOLLOW_PATH=402
+uint16 TIMEOUT=404
+
+uint16 error_code 0
+string error_msg
+---
+#feedback definition
+uint16 NONE=0
+uint16 CREATING_POSES=1
+uint16 PLANNING=2
+uint16 COVERING=3
+
+uint16 status_code 0
