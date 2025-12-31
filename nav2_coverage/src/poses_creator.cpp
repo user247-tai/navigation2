@@ -144,7 +144,14 @@ std::vector<geometry_msgs::msg::Pose> PosesCreator::orderSerpentine(
 geometry_msgs::msg::PoseArray PosesCreator::create(
   const nav_msgs::msg::OccupancyGrid & map,
   const nav_msgs::msg::OccupancyGrid & costmap,
-  const std::string & order_mode)
+  const std::string & order_mode,
+  const bool enable_serpentine,
+  const bool columns_left_to_right,
+  const bool rows_bottom_to_top,
+  const float downsample_step_x,
+  const float downsample_step_y,
+  const int map_occ_threshold,
+  const int costmap_occ_threshold)
 {
   const auto map_meta = metaFromGrid(map);
   const auto cost_meta = metaFromGrid(costmap);
@@ -155,10 +162,10 @@ geometry_msgs::msg::PoseArray PosesCreator::create(
   const int step_x_cells = std::max(1, static_cast<int>(std::lround(opts_.grid_step_x / map_meta.resolution)));
   const int step_y_cells = std::max(1, static_cast<int>(std::lround(opts_.grid_step_y / map_meta.resolution)));
 
-  const int dsx_cells = (opts_.downsample_step_x > 0.0) ?
-    std::max(1, static_cast<int>(std::lround(opts_.downsample_step_x / map_meta.resolution))) : 1;
-  const int dsy_cells = (opts_.downsample_step_y > 0.0) ?
-    std::max(1, static_cast<int>(std::lround(opts_.downsample_step_y / map_meta.resolution))) : 1;
+  const int dsx_cells = (downsample_step_x > 0.0) ?
+    std::max(1, static_cast<int>(std::lround(downsample_step_x / map_meta.resolution))) : 1;
+  const int dsy_cells = (downsample_step_y > 0.0) ?
+    std::max(1, static_cast<int>(std::lround(downsample_step_y / map_meta.resolution))) : 1;
 
   const int half_dsx = dsx_cells / 2;
   const int half_dsy = dsy_cells / 2;
@@ -183,7 +190,7 @@ geometry_msgs::msg::PoseArray PosesCreator::create(
       if (occ < 0) {
         if (!opts_.allow_unknown_map) continue;
       } else {
-        if (occ >= opts_.map_occ_threshold) continue;
+        if (occ >= map_occ_threshold) continue;
       }
 
       const double wx = map_meta.origin_x + (static_cast<double>(mx) + 0.5) * map_meta.resolution;
@@ -199,7 +206,7 @@ geometry_msgs::msg::PoseArray PosesCreator::create(
         if (c < 0) {
           if (!opts_.allow_unknown_costmap) continue;
         } else {
-          if (c >= opts_.costmap_occ_threshold) continue;
+          if (c >= costmap_occ_threshold) continue;
         }
       }
 
@@ -236,7 +243,7 @@ geometry_msgs::msg::PoseArray PosesCreator::create(
   geometry_msgs::msg::PoseArray out;
   out.header.frame_id = map_meta.frame_id;
 
-  if (!opts_.enable_serpentine) {
+  if (!enable_serpentine) {
     std::sort(nodes.begin(), nodes.end(), [](const auto & a, const auto & b) {
       const int ax = std::get<0>(a), ay = std::get<1>(a);
       const int bx = std::get<0>(b), by = std::get<1>(b);
@@ -251,7 +258,7 @@ geometry_msgs::msg::PoseArray PosesCreator::create(
   }
 
   out.poses = orderSerpentine(nodes, dsx_cells, dsy_cells, order_mode,
-                              opts_.columns_left_to_right, opts_.rows_bottom_to_top);
+                              columns_left_to_right, rows_bottom_to_top);
   return out;
 }
 

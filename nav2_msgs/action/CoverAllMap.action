@@ -1,14 +1,21 @@
 #goal definition
 string order_mode "rows"
+bool enable_serpentine true
+bool columns_left_to_right true
+bool rows_bottom_to_top true
+float32 downsample_step_x 0.5
+float32 downsample_step_y 0.5
+int32 map_occ_threshold 50
+int32 costmap_occ_threshold 20
 ---
 #result definition
 
 # Error codes
 uint16 NONE=0
-uint16 UNKNOWN=400
-uint16 FAIL_TO_PLAN=401
-uint16 FAIL_TO_FOLLOW_PATH=402
-uint16 TIMEOUT=404
+uint16 UNKNOWN=1
+uint16 FAIL_TO_PLAN=2
+uint16 FAIL_TO_FOLLOW_PATH=3
+uint16 TIMEOUT=4
 
 uint16 error_code 0
 string error_msg
@@ -18,5 +25,6 @@ uint16 NONE=0
 uint16 CREATING_POSES=1
 uint16 PLANNING=2
 uint16 COVERING=3
+uint16 RECOVERING=4
 
 uint16 status_code 0

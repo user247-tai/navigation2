@@ -94,19 +94,9 @@ CoverageServer::CoverageServer(const rclcpp::NodeOptions & options)
   // ---- PosesCreator options ----
   declare_parameter("grid_step_x", 0.05);
   declare_parameter("grid_step_y", 0.05);
-
-  declare_parameter("downsample_step_x", 0.5);
-  declare_parameter("downsample_step_y", 0.5);
-
-  declare_parameter("map_occ_threshold", 50);
-  declare_parameter("costmap_occ_threshold", 20);
   declare_parameter("allow_unknown_map", false);
   declare_parameter("allow_unknown_costmap", false);
   declare_parameter("skip_outside_costmap", true);
-
-  declare_parameter("enable_serpentine", true);
-  declare_parameter("columns_left_to_right", true);
-  declare_parameter("rows_bottom_to_top", true);
 }
 
 builtin_interfaces::msg::Time CoverageServer::toTimeMsg(const rclcpp::Time & t)
@@ -146,16 +136,9 @@ nav2_util::CallbackReturn CoverageServer::on_configure(const rclcpp_lifecycle::S
   PosesCreator::Options pc;
   pc.grid_step_x = get_parameter("grid_step_x").as_double();
   pc.grid_step_y = get_parameter("grid_step_y").as_double();
-  pc.downsample_step_x = get_parameter("downsample_step_x").as_double();
-  pc.downsample_step_y = get_parameter("downsample_step_y").as_double();
-  pc.map_occ_threshold = get_parameter("map_occ_threshold").as_int();
-  pc.costmap_occ_threshold = get_parameter("costmap_occ_threshold").as_int();
   pc.allow_unknown_map = get_parameter("allow_unknown_map").as_bool();
   pc.allow_unknown_costmap = get_parameter("allow_unknown_costmap").as_bool();
   pc.skip_outside_costmap = get_parameter("skip_outside_costmap").as_bool();
-  pc.enable_serpentine = get_parameter("enable_serpentine").as_bool();
-  pc.columns_left_to_right = get_parameter("columns_left_to_right").as_bool();
-  pc.rows_bottom_to_top = get_parameter("rows_bottom_to_top").as_bool();
   poses_creator_ = std::make_unique<PosesCreator>(pc, get_logger());
 
   // QoS for latched map/costmap
@@ -489,7 +472,17 @@ void CoverageServer::runPipeline(const std::shared_ptr<GoalHandleCoverAllMap> go
     return;
   }
 
-  geometry_msgs::msg::PoseArray poses = poses_creator_->create(*map, *costmap, mode);
+  geometry_msgs::msg::PoseArray poses = poses_creator_->create(*map, 
+                                                              *costmap, 
+                                                              mode,
+                                                              goal->enable_serpentine,
+                                                              goal->columns_left_to_right,
+                                                              goal->rows_bottom_to_top,
+                                                              goal->downsample_step_x,
+                                                              goal->downsample_step_y,
+                                                              goal->map_occ_threshold,
+                                                              goal->costmap_occ_threshold);
+
   poses.header.stamp = toTimeMsg(now());
   if (poses.header.frame_id.empty()) poses.header.frame_id = "map";
 
