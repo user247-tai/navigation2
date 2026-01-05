@@ -333,10 +333,10 @@ void CoverageServer::updateRobotPose()
     size_t index_offset = 0;
     
     if ((active_goal_ != nullptr) && (active_goal_->get_goal()->order_mode == "columns")) {
-      index_offset = static_cast<size_t>(std::ceil(1.0 / static_cast<float>(active_goal_->get_goal()->downsample_step_x)));
+      index_offset = static_cast<size_t>(std::ceil(1.0 / static_cast<float>(active_goal_->get_goal()->downsample_step_y)));
     }
     else if (active_goal_ != nullptr) {
-      index_offset = static_cast<size_t>(std::ceil(1.0 / static_cast<float>(active_goal_->get_goal()->downsample_step_y)));
+      index_offset = static_cast<size_t>(std::ceil(1.0 / static_cast<float>(active_goal_->get_goal()->downsample_step_x)));
     }
 
     if ((temp_index >= current_index_ + 1) && (temp_index <= current_index_ + index_offset)) {
@@ -429,10 +429,10 @@ size_t CoverageServer::findNearestIndex(const std::vector<geometry_msgs::msg::Po
 
   size_t index_offset = 0;
   if ((active_goal_ != nullptr) && (active_goal_->get_goal()->order_mode == "columns")) {
-    index_offset = static_cast<size_t>(std::ceil(1.0 / static_cast<float>(active_goal_->get_goal()->downsample_step_x)));
+    index_offset = static_cast<size_t>(std::ceil(1.0 / static_cast<float>(active_goal_->get_goal()->downsample_step_y)));
   }
   else if (active_goal_ != nullptr) {
-    index_offset = static_cast<size_t>(std::ceil(1.0 / static_cast<float>(active_goal_->get_goal()->downsample_step_y)));
+    index_offset = static_cast<size_t>(std::ceil(1.0 / static_cast<float>(active_goal_->get_goal()->downsample_step_x)));
   }
 
   if ((best_i >= current_index_ + 1) && (best_i <= current_index_ + index_offset)) {
