@@ -25,6 +25,10 @@
 #include "nav2_msgs/action/cover_all_map.hpp"
 
 #include "nav2_coverage/poses_creator.hpp"
+#include "nav2_costmap_2d/costmap_2d_ros.hpp"
+#include "nav2_costmap_2d/footprint_collision_checker.hpp"
+
+#include "rclcpp/callback_group.hpp"
 
 namespace nav2_coverage
 {
@@ -33,7 +37,7 @@ class CoverageServer : public nav2_util::LifecycleNode
 {
 public:
   explicit CoverageServer(const rclcpp::NodeOptions & options = rclcpp::NodeOptions());
-  ~CoverageServer() override = default;
+  ~CoverageServer();
 
 protected:
   nav2_util::CallbackReturn on_configure(const rclcpp_lifecycle::State & state) override;
@@ -53,17 +57,24 @@ private:
   void onMap(const nav_msgs::msg::OccupancyGrid::SharedPtr msg);
   void onCostmap(const nav_msgs::msg::OccupancyGrid::SharedPtr msg);
 
+  // Timer callback
+  void updateRobotPose();
+
   rclcpp::Subscription<nav_msgs::msg::OccupancyGrid>::SharedPtr map_sub_;
   rclcpp::Subscription<nav_msgs::msg::OccupancyGrid>::SharedPtr costmap_sub_;
 
   // Latest data
   std::mutex grid_mutex_;
+  std::mutex goal_list_mutex_;
   nav_msgs::msg::OccupancyGrid::SharedPtr map_msg_;
   nav_msgs::msg::OccupancyGrid::SharedPtr costmap_msg_;
 
   // Publishers (debug)
   rclcpp_lifecycle::LifecyclePublisher<geometry_msgs::msg::PoseArray>::SharedPtr graph_nodes_pub_;
   rclcpp_lifecycle::LifecyclePublisher<nav_msgs::msg::Path>::SharedPtr debug_path_pub_;
+
+  // Timer
+  rclcpp::TimerBase::SharedPtr timer_;
 
   // Action server
   rclcpp_action::Server<CoverAllMap>::SharedPtr cover_action_server_;
@@ -93,9 +104,16 @@ private:
 
   // Components
   std::unique_ptr<PosesCreator> poses_creator_;
+  std::shared_ptr<nav2_costmap_2d::Costmap2DROS> costmap_ros_;
+  std::unique_ptr<nav2_util::NodeThread> costmap_thread_;
+  nav2_costmap_2d::Costmap2D * costmap_;
+  std::unique_ptr<nav2_costmap_2d::FootprintCollisionChecker<nav2_costmap_2d::Costmap2D *>> collision_checker_;
+  std::vector<geometry_msgs::msg::PoseStamped> goal_list_;
+  size_t current_index_{0};
 
   // Helpers
   static std::string toLower(std::string s);
+  size_t findNearestIndex(const std::vector<geometry_msgs::msg::PoseStamped> & goals, const geometry_msgs::msg::PoseStamped & robot_pose);
 
   bool waitForMapCostmap(
     nav_msgs::msg::OccupancyGrid::SharedPtr & map,
@@ -126,6 +144,8 @@ private:
   std::string planner_id_;
   std::string controller_id_;
   std::string goal_checker_id_;
+  int retries_on_failure_{0};
+  int recovery_obstacle_max_cost_{100};
 
   // Timeouts
   double wait_grid_timeout_sec_{5.0};
@@ -135,6 +155,10 @@ private:
   // Downsample computed path
   int downsample_keep_every_n_{0};
   double downsample_min_dist_{0.0};
+
+  // Callback groups
+  rclcpp::CallbackGroup::SharedPtr coverage_cb_group_;
+  rclcpp::CallbackGroup::SharedPtr update_pose_cb_group_;
 };
 
 }  // namespace nav2_coverage

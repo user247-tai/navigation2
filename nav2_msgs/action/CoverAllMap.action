@@ -11,7 +11,7 @@ int32 costmap_occ_threshold 20
 #result definition
 
 # Error codes
-uint16 NONE=0
+uint16 SUCCESS=0
 uint16 UNKNOWN=1
 uint16 FAIL_TO_PLAN=2
 uint16 FAIL_TO_FOLLOW_PATH=3

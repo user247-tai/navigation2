@@ -1,9 +1,11 @@
 #include "nav2_coverage/coverage_server.hpp"
+#include "lifecycle_msgs/msg/state.hpp"
 
 #include <algorithm>
 #include <cmath>
 
 #include "nav2_util/node_utils.hpp"
+#include "nav2_costmap_2d/cost_values.hpp"
 
 namespace nav2_coverage
 {
@@ -62,7 +64,7 @@ void setGoalCheckerId(GoalT &, const std::string &, long) {}
 }  // namespace
 
 CoverageServer::CoverageServer(const rclcpp::NodeOptions & options)
-: nav2_util::LifecycleNode("coverage_server", "", options)
+: nav2_util::LifecycleNode("coverage_server", "", options), costmap_(nullptr), current_index_(0)
 {
   // topics
   declare_parameter("map_topic", "/map");
@@ -81,6 +83,8 @@ CoverageServer::CoverageServer(const rclcpp::NodeOptions & options)
   declare_parameter("planner_id", "");
   declare_parameter("controller_id", "");
   declare_parameter("goal_checker_id", "");
+  declare_parameter("retries_on_failure", 0);
+  declare_parameter("recovery_obstacle_max_cost", 100);
 
   // timeouts
   declare_parameter("wait_grid_timeout_sec", 5.0);
@@ -97,6 +101,30 @@ CoverageServer::CoverageServer(const rclcpp::NodeOptions & options)
   declare_parameter("allow_unknown_map", false);
   declare_parameter("allow_unknown_costmap", false);
   declare_parameter("skip_outside_costmap", true);
+
+  // Setup callback group
+  coverage_cb_group_ = create_callback_group(rclcpp::CallbackGroupType::MutuallyExclusive);
+  update_pose_cb_group_ = create_callback_group(rclcpp::CallbackGroupType::MutuallyExclusive);
+
+  // Setup the global costmap
+  costmap_ros_ = std::make_shared<nav2_costmap_2d::Costmap2DROS>(
+    "global_costmap", std::string{get_namespace()},
+    get_parameter("use_sim_time").as_bool());
+}
+
+CoverageServer::~CoverageServer()
+{
+  // Ensure that the worker thread is stopped
+  stop_worker_.store(true);
+  goal_cv_.notify_all();
+  if (worker_thread_.joinable()) {
+    worker_thread_.join();
+  }
+  if (timer_) {
+    timer_->cancel();
+    timer_.reset();
+  }
+  costmap_thread_.reset();
 }
 
 builtin_interfaces::msg::Time CoverageServer::toTimeMsg(const rclcpp::Time & t)
@@ -110,6 +138,8 @@ builtin_interfaces::msg::Time CoverageServer::toTimeMsg(const rclcpp::Time & t)
 
 nav2_util::CallbackReturn CoverageServer::on_configure(const rclcpp_lifecycle::State &)
 {
+  RCLCPP_INFO(get_logger(), "Configuring");
+
   map_topic_ = get_parameter("map_topic").as_string();
   costmap_topic_ = get_parameter("costmap_topic").as_string();
 
@@ -124,6 +154,8 @@ nav2_util::CallbackReturn CoverageServer::on_configure(const rclcpp_lifecycle::S
   planner_id_ = get_parameter("planner_id").as_string();
   controller_id_ = get_parameter("controller_id").as_string();
   goal_checker_id_ = get_parameter("goal_checker_id").as_string();
+  retries_on_failure_ = get_parameter("retries_on_failure").as_int();
+  recovery_obstacle_max_cost_ = get_parameter("recovery_obstacle_max_cost").as_int();
 
   wait_grid_timeout_sec_ = get_parameter("wait_grid_timeout_sec").as_double();
   compute_timeout_sec_ = get_parameter("compute_timeout_sec").as_double();
@@ -146,13 +178,28 @@ nav2_util::CallbackReturn CoverageServer::on_configure(const rclcpp_lifecycle::S
   qos_grid.reliable();
   qos_grid.transient_local();
 
+  // Subscription options
+  rclcpp::SubscriptionOptions sub_opts;
+  sub_opts.callback_group = coverage_cb_group_;
+
+  // Create subscriptions
   map_sub_ = create_subscription<nav_msgs::msg::OccupancyGrid>(
     map_topic_, qos_grid,
-    std::bind(&CoverageServer::onMap, this, std::placeholders::_1));
+    std::bind(&CoverageServer::onMap, this, std::placeholders::_1), sub_opts);
 
   costmap_sub_ = create_subscription<nav_msgs::msg::OccupancyGrid>(
     costmap_topic_, qos_grid,
-    std::bind(&CoverageServer::onCostmap, this, std::placeholders::_1));
+    std::bind(&CoverageServer::onCostmap, this, std::placeholders::_1), sub_opts);
+
+  // Configure costmap
+  costmap_ros_->configure();
+  costmap_ = costmap_ros_->getCostmap();
+  if (!costmap_ros_->getUseRadius()) {
+    collision_checker_ = std::make_unique<nav2_costmap_2d::FootprintCollisionChecker<nav2_costmap_2d::Costmap2D *>>(costmap_);
+  }
+  
+  // Launch a thread to run the costmap node
+  costmap_thread_ = std::make_unique<nav2_util::NodeThread>(costmap_ros_);
 
   // Debug publishers (latched)
   rclcpp::QoS qos_debug(1);
@@ -166,12 +213,12 @@ nav2_util::CallbackReturn CoverageServer::on_configure(const rclcpp_lifecycle::S
   compute_client_ = rclcpp_action::create_client<Compute>(shared_from_this(), compute_action_name_);
   follow_client_ = rclcpp_action::create_client<Follow>(shared_from_this(), follow_action_name_);
 
-  RCLCPP_INFO(get_logger(), "Configured coverage_server");
   return nav2_util::CallbackReturn::SUCCESS;
 }
 
 nav2_util::CallbackReturn CoverageServer::on_activate(const rclcpp_lifecycle::State &)
 {
+  RCLCPP_INFO(get_logger(), "Activating");
   graph_nodes_pub_->on_activate();
   debug_path_pub_->on_activate();
 
@@ -189,12 +236,20 @@ nav2_util::CallbackReturn CoverageServer::on_activate(const rclcpp_lifecycle::St
     worker_thread_ = std::thread(&CoverageServer::workerLoop, this);
   }
 
-  RCLCPP_INFO(get_logger(), "Activated coverage_server action: %s", cover_action_name_.c_str());
+  const auto costmap_ros_state = costmap_ros_->activate();
+  if (costmap_ros_state.id() != lifecycle_msgs::msg::State::PRIMARY_STATE_ACTIVE) {
+    return nav2_util::CallbackReturn::FAILURE;
+  }
+
+  // create bond connection
+  createBond();
+
   return nav2_util::CallbackReturn::SUCCESS;
 }
 
 nav2_util::CallbackReturn CoverageServer::on_deactivate(const rclcpp_lifecycle::State &)
 {
+  RCLCPP_INFO(get_logger(), "Deactivating");
   // Stop worker cleanly first
   stop_worker_.store(true);
   goal_cv_.notify_all();
@@ -202,16 +257,28 @@ nav2_util::CallbackReturn CoverageServer::on_deactivate(const rclcpp_lifecycle::
     worker_thread_.join();
   }
 
+  if (timer_) {
+    timer_->cancel();
+    timer_.reset();
+  }
+
   cover_action_server_.reset();
   graph_nodes_pub_->on_deactivate();
   debug_path_pub_->on_deactivate();
 
-  RCLCPP_INFO(get_logger(), "Deactivated coverage_server");
+  costmap_ros_->deactivate();
+
+  current_index_ = 0;
+  // destroy bond connection
+  destroyBond();
+
   return nav2_util::CallbackReturn::SUCCESS;
 }
 
 nav2_util::CallbackReturn CoverageServer::on_cleanup(const rclcpp_lifecycle::State &)
 {
+  RCLCPP_INFO(get_logger(), "Cleaning up");
+
   cover_action_server_.reset();
   map_sub_.reset();
   costmap_sub_.reset();
@@ -227,13 +294,18 @@ nav2_util::CallbackReturn CoverageServer::on_cleanup(const rclcpp_lifecycle::Sta
     costmap_msg_.reset();
   }
 
+  costmap_ros_->cleanup();
+  costmap_thread_.reset();
+  costmap_ = nullptr;
+  current_index_ = 0;
+
   RCLCPP_INFO(get_logger(), "Cleaned up coverage_server");
   return nav2_util::CallbackReturn::SUCCESS;
 }
 
 nav2_util::CallbackReturn CoverageServer::on_shutdown(const rclcpp_lifecycle::State &)
 {
-  RCLCPP_INFO(get_logger(), "Shutdown coverage_server");
+  RCLCPP_INFO(get_logger(), "Shutting down");
   return nav2_util::CallbackReturn::SUCCESS;
 }
 
@@ -247,6 +319,30 @@ void CoverageServer::onCostmap(const nav_msgs::msg::OccupancyGrid::SharedPtr msg
 {
   std::lock_guard<std::mutex> lk(grid_mutex_);
   costmap_msg_ = msg;
+}
+
+void CoverageServer::updateRobotPose()
+{
+  std::lock_guard<std::mutex> lk(goal_list_mutex_);
+  if (!costmap_ros_ || (goal_list_.empty())) {
+    return;
+  }
+  geometry_msgs::msg::PoseStamped pose;
+  if (costmap_ros_->getRobotPose(pose)) {
+    size_t temp_index = findNearestIndex(goal_list_, pose);
+    size_t index_offset = 0;
+    
+    if ((active_goal_ != nullptr) && (active_goal_->get_goal()->order_mode == "columns")) {
+      index_offset = static_cast<size_t>(std::ceil(1.0 / static_cast<float>(active_goal_->get_goal()->downsample_step_x)));
+    }
+    else if (active_goal_ != nullptr) {
+      index_offset = static_cast<size_t>(std::ceil(1.0 / static_cast<float>(active_goal_->get_goal()->downsample_step_y)));
+    }
+
+    if ((temp_index >= current_index_ + 1) && (temp_index <= current_index_ + index_offset)) {
+      current_index_ = temp_index;
+    }
+  }
 }
 
 rclcpp_action::GoalResponse CoverageServer::handleGoal(
@@ -314,6 +410,35 @@ std::string CoverageServer::toLower(std::string s)
 {
   std::transform(s.begin(), s.end(), s.begin(), ::tolower);
   return s;
+}
+
+size_t CoverageServer::findNearestIndex(const std::vector<geometry_msgs::msg::PoseStamped> & goals, const geometry_msgs::msg::PoseStamped & robot_pose)
+{
+  size_t best_i = 0;
+  double best_d = std::numeric_limits<double>::infinity();
+
+  for (size_t i = 0; i < goals.size(); ++i) {
+    const double dx = goals[i].pose.position.x - robot_pose.pose.position.x;
+    const double dy = goals[i].pose.position.y - robot_pose.pose.position.y;
+    const double d = std::hypot(dx, dy);
+    if (d < best_d) {
+      best_d = d;
+      best_i = i;
+    }
+  }
+
+  size_t index_offset = 0;
+  if ((active_goal_ != nullptr) && (active_goal_->get_goal()->order_mode == "columns")) {
+    index_offset = static_cast<size_t>(std::ceil(1.0 / static_cast<float>(active_goal_->get_goal()->downsample_step_x)));
+  }
+  else if (active_goal_ != nullptr) {
+    index_offset = static_cast<size_t>(std::ceil(1.0 / static_cast<float>(active_goal_->get_goal()->downsample_step_y)));
+  }
+
+  if ((best_i >= current_index_ + 1) && (best_i <= current_index_ + index_offset)) {
+    return best_i;
+  }
+  return current_index_;
 }
 
 bool CoverageServer::waitForMapCostmap(
@@ -521,16 +646,19 @@ void CoverageServer::runPipeline(const std::shared_ptr<GoalHandleCoverAllMap> go
 
   setPlannerId(compute_goal, planner_id_, 0);
 
-  std::vector<geometry_msgs::msg::PoseStamped> goal_list;
-  goal_list.reserve(poses.poses.size());
-  for (const auto & p : poses.poses) {
-    geometry_msgs::msg::PoseStamped ps;
-    ps.header.stamp = stamp_msg;
-    ps.header.frame_id = frame_id;
-    ps.pose = p;
-    goal_list.push_back(ps);
+  {
+    std::lock_guard<std::mutex> lk(goal_list_mutex_);
+    goal_list_.resize(0);
+    for (const auto & p : poses.poses) {
+      geometry_msgs::msg::PoseStamped ps;
+      ps.header.stamp = stamp_msg;
+      ps.header.frame_id = frame_id;
+      ps.pose = p;
+      goal_list_.push_back(ps);
+    }
+    current_index_ = 0;
   }
-  setComputeGoals(compute_goal, goal_list, stamp_msg, frame_id, 0);
+  setComputeGoals(compute_goal, goal_list_, stamp_msg, frame_id, 0);
 
   auto compute_goal_future = compute_client_->async_send_goal(compute_goal);
 
@@ -594,6 +722,11 @@ void CoverageServer::runPipeline(const std::shared_ptr<GoalHandleCoverAllMap> go
     result->error_msg = "ComputePathThroughPoses failed or returned empty path";
     goal_handle->abort(result);
     return;
+  }
+
+  // Create timer to update current index based on robot pose
+  if (!timer_) {
+    timer_ = create_wall_timer(std::chrono::milliseconds(50), std::bind(&CoverageServer::updateRobotPose, this), update_pose_cb_group_);
   }
 
   nav_msgs::msg::Path path = compute_wrapped.result->path;
@@ -679,16 +812,250 @@ void CoverageServer::runPipeline(const std::shared_ptr<GoalHandleCoverAllMap> go
 
   auto follow_wrapped = follow_result_future.get();
   if (follow_wrapped.code != rclcpp_action::ResultCode::SUCCEEDED) {
-    result->error_code = CoverAllMap::Result::FAIL_TO_FOLLOW_PATH;
-    result->error_msg = "FollowPath failed";
-    goal_handle->abort(result);
-    return;
+    bool success_recovered = false;
+
+    while(retries_on_failure_ != 0 || retries_on_failure_ == -1) {
+      bool continue_flag = false;
+      if (retries_on_failure_ > 0) { 
+        retries_on_failure_--; 
+      }
+
+      publish_state(CoverAllMap::Feedback::RECOVERING);
+
+      geometry_msgs::msg::PoseStamped current_robot_pose;
+      if (costmap_ros_->getRobotPose(current_robot_pose)) {
+        // Create new path from current position to remaining goals
+        std::vector<geometry_msgs::msg::PoseStamped> remaining_goal_list;
+        remaining_goal_list.reserve(goal_list_.size() - current_index_ + 1);
+        remaining_goal_list.push_back(current_robot_pose);
+        
+        std::unique_lock<nav2_costmap_2d::Costmap2D::mutex_t> lock(*(costmap_->getMutex()));
+        unsigned int mx = 0;
+        unsigned int my = 0;
+        bool use_radius = costmap_ros_->getUseRadius();
+        
+        for (size_t i = current_index_ + 1; i < goal_list_.size(); ++i) {
+          unsigned int cost = nav2_costmap_2d::FREE_SPACE;
+          if (use_radius) {
+            if (costmap_->worldToMap(goal_list_[i].pose.position.x, goal_list_[i].pose.position.y, mx, my)) {
+              cost = costmap_->getCost(mx, my);
+            } else {
+              cost = nav2_costmap_2d::LETHAL_OBSTACLE;
+            }
+          } else {
+            nav2_costmap_2d::Footprint footprint = costmap_ros_->getRobotFootprint();
+            auto theta = tf2::getYaw(goal_list_[i].pose.orientation);
+            cost = static_cast<unsigned int>(collision_checker_->footprintCostAtPose(
+              goal_list_[i].pose.position.x, goal_list_[i].pose.position.y, theta, footprint));
+          }
+          if (cost >= static_cast<unsigned int>(recovery_obstacle_max_cost_)) {
+            continue;
+          } else {
+            remaining_goal_list.push_back(goal_list_[i]);
+          }
+        }
+
+        {
+          std::lock_guard<std::mutex> lk(goal_list_mutex_);
+          goal_list_.resize(remaining_goal_list.size());
+          goal_list_ = remaining_goal_list;
+          current_index_ = 0;
+        }
+
+        geometry_msgs::msg::PoseArray msg;
+        msg.header.stamp = toTimeMsg(now());
+        msg.header.frame_id = frame_id;
+        for (const auto & p: goal_list_) {
+          msg.poses.push_back(p.pose);
+        }
+
+        if (graph_nodes_pub_ && graph_nodes_pub_->is_activated()) {
+          graph_nodes_pub_->publish(msg);
+        }
+
+        publish_state(CoverAllMap::Feedback::PLANNING);
+
+        // Re-plan path
+        if (!compute_client_->wait_for_action_server(std::chrono::seconds(2))) {
+          RCLCPP_WARN(get_logger(), "ComputePathThroughPoses action server not available during recovery");
+          continue;
+        }
+
+        Compute::Goal recovery_compute_goal;
+        const auto recovery_stamp_msg = toTimeMsg(now());
+
+        setPlannerId(recovery_compute_goal, planner_id_, 0);
+
+        setComputeGoals(recovery_compute_goal, remaining_goal_list, recovery_stamp_msg, frame_id, 0);
+
+        auto recovery_compute_goal_future = compute_client_->async_send_goal(recovery_compute_goal);
+
+        // wait goal-handle in small steps to allow preempt/cancel
+        continue_flag = false;
+        {
+          const auto start_t = now();
+          while (rclcpp::ok()) {
+            if (check_stop()) {
+              if (preempt_requested_.load()) { finish_preempted(); return; }
+              finish_canceled(); return;
+            }
+            if (recovery_compute_goal_future.wait_for(std::chrono::milliseconds(100)) == std::future_status::ready) {
+              break;
+            }
+            if (compute_timeout_sec_ > 0.0 && (now() - start_t).seconds() > compute_timeout_sec_) {
+              RCLCPP_WARN(get_logger(), "ComputePathThroughPoses action server not available during recovery");
+              continue_flag = true;
+              break;
+            }
+          }
+        }if (continue_flag) {continue;}
+
+        auto recovery_compute_goal_handle = recovery_compute_goal_future.get();
+        if (!recovery_compute_goal_handle) {
+          RCLCPP_WARN(get_logger(), "ComputePathThroughPoses goal rejected during recovery");
+          continue;
+        }
+
+        auto recovery_compute_result_future = compute_client_->async_get_result(recovery_compute_goal_handle);
+
+        // wait for result with preempt/cancel checks
+        continue_flag = false;
+        {
+          const auto start_t = now();
+          while (rclcpp::ok()) {
+            if (check_stop()) {
+              compute_client_->async_cancel_goal(recovery_compute_goal_handle);
+              if (preempt_requested_.load()) { finish_preempted(); return; }
+              finish_canceled(); return;
+            }
+            if (recovery_compute_result_future.wait_for(std::chrono::milliseconds(200)) == std::future_status::ready) {
+              break;
+            }
+            if (compute_timeout_sec_ > 0.0 && (now() - start_t).seconds() > compute_timeout_sec_) {
+              compute_client_->async_cancel_goal(recovery_compute_goal_handle);
+              RCLCPP_WARN(get_logger(), "Timeout waiting ComputePathThroughPoses result during recovery");
+              continue_flag = true;
+              break;
+            }
+          }
+        }if (continue_flag) {continue;}
+
+        auto recovery_compute_wrapped = recovery_compute_result_future.get();
+        if (recovery_compute_wrapped.code != rclcpp_action::ResultCode::SUCCEEDED ||
+            !recovery_compute_wrapped.result || recovery_compute_wrapped.result->path.poses.empty())
+        {
+          RCLCPP_WARN(get_logger(), "ComputePathThroughPoses failed or returned empty path during recovery");
+          continue;
+        }
+
+        nav_msgs::msg::Path recovery_path = recovery_compute_wrapped.result->path;
+        recovery_path.header.stamp = stamp_msg;
+        recovery_path.header.frame_id = frame_id;
+
+        ds_path = downsamplePath(recovery_path);
+        ds_path.header.stamp = toTimeMsg(now());
+        ds_path.header.frame_id = frame_id;
+
+        if (debug_path_pub_ && debug_path_pub_->is_activated()) {
+          debug_path_pub_->publish(ds_path);
+        }
+
+        // ---- Covering ----
+        publish_state(CoverAllMap::Feedback::COVERING);
+
+        if (!follow_client_->wait_for_action_server(std::chrono::seconds(2))) {
+          RCLCPP_WARN(get_logger(), "FollowPath action server not available during recovery");
+          continue;
+        }
+
+        Follow::Goal recovery_follow_goal;
+        recovery_follow_goal.path = ds_path;
+        setControllerId(recovery_follow_goal, controller_id_, 0);
+        setGoalCheckerId(recovery_follow_goal, goal_checker_id_, 0);
+
+        auto recovery_follow_goal_future = follow_client_->async_send_goal(recovery_follow_goal);
+
+        // wait goal-handle in small steps
+        continue_flag = false;
+        {
+          const auto start_t = now();
+          while (rclcpp::ok()) {
+            if (check_stop()) {
+              if (preempt_requested_.load()) { finish_preempted(); return; }
+              finish_canceled(); return;
+            }
+            if (recovery_follow_goal_future.wait_for(std::chrono::milliseconds(100)) == std::future_status::ready) {
+              break;
+            }
+            if (follow_timeout_sec_ > 0.0 && (now() - start_t).seconds() > follow_timeout_sec_) {
+              RCLCPP_WARN(get_logger(), "FollowPath action server not available during recovery");
+              continue_flag = true;
+              break;
+            }
+          }
+        }if (continue_flag) {continue;}
+
+        auto recovery_follow_goal_handle = recovery_follow_goal_future.get();
+        if (!recovery_follow_goal_handle) {
+          RCLCPP_WARN(get_logger(), "FollowPath goal rejected during recovery");
+          continue;
+        }
+
+        auto recovery_follow_result_future = follow_client_->async_get_result(recovery_follow_goal_handle);
+
+        // wait result with preempt/cancel checks
+        continue_flag = false;
+        {
+          const auto start_t = now();
+          while (rclcpp::ok()) {
+            if (check_stop()) {
+              follow_client_->async_cancel_goal(recovery_follow_goal_handle);
+              if (preempt_requested_.load()) { finish_preempted(); return; }
+              finish_canceled(); return;
+            }
+            if (recovery_follow_result_future.wait_for(std::chrono::milliseconds(200)) == std::future_status::ready) {
+              break;
+            }
+            if (follow_timeout_sec_ > 0.0 && (now() - start_t).seconds() > follow_timeout_sec_) {
+              follow_client_->async_cancel_goal(recovery_follow_goal_handle);
+              RCLCPP_WARN(get_logger(), "Timeout waiting FollowPath result during recovery");
+              continue_flag = true;
+              break;
+            }
+          }
+        } if (continue_flag) {continue;}
+
+        auto recovery_follow_wrapped = recovery_follow_result_future.get();
+        if (recovery_follow_wrapped.code != rclcpp_action::ResultCode::SUCCEEDED) {
+          RCLCPP_WARN(get_logger(), "FollowPath failed during recovery");
+          continue;
+        } 
+        else {
+          success_recovered = true;
+          break;
+        }
+      }
+    }
+    if (!success_recovered) {
+      result->error_code = CoverAllMap::Result::FAIL_TO_FOLLOW_PATH;
+      result->error_msg = "FollowPath failed";
+      goal_handle->abort(result);
+      if (timer_) {
+        timer_->cancel();
+        timer_.reset();
+      }
+      return;
+    }
   }
 
   // Success
-  result->error_code = CoverAllMap::Result::NONE;
+  result->error_code = CoverAllMap::Result::SUCCESS;
   result->error_msg = "";
   goal_handle->succeed(result);
+  if (timer_) {
+    timer_->cancel();
+    timer_.reset();
+  }
 }
 
 }  // namespace nav2_coverage

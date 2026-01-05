@@ -11,6 +11,7 @@ find_package(nav2_util REQUIRED)
 find_package(nav2_msgs REQUIRED)
 find_package(geometry_msgs REQUIRED)
 find_package(nav_msgs REQUIRED)
+find_package(nav2_costmap_2d REQUIRED)
 
 nav2_package()
 
@@ -35,6 +36,7 @@ target_link_libraries(${library_name} PUBLIC
   rclcpp_components::component
 
   nav2_util::nav2_util_core
+  nav2_costmap_2d::nav2_costmap_2d_core
 
   ${nav2_msgs_TARGETS}
   ${geometry_msgs_TARGETS}
@@ -84,6 +86,7 @@ ament_export_dependencies(
   nav2_msgs
   geometry_msgs
   nav_msgs
+  nav2_costmap_2d
 )
 ament_export_targets(${library_name})
 
