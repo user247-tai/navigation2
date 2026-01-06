@@ -624,6 +624,10 @@ docking_server:
     base_frame: "base_link"
     fixed_frame: "odom"
     dock_prestaging_tolerance: 0.5
+    dynamic_docking_enabled: True
+    dynamic_docking_x_error_threshold: 0.1
+    dynamic_docking_y_error_threshold: 0.1
+    dynamic_docking_yaw_error_threshold: 10.0 # degrees
     service_introspection_mode: "disabled"
 
     # Types of docks
