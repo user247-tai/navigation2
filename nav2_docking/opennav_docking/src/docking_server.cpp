@@ -11,7 +11,7 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
-
+#include <cmath>
 #include "angles/angles.h"
 #include "opennav_docking/docking_server.hpp"
 #include "tf2_geometry_msgs/tf2_geometry_msgs.hpp"
@@ -43,6 +43,10 @@ DockingServer::DockingServer(const rclcpp::NodeOptions & options)
   declare_parameter("dock_prestaging_tolerance", 0.5);
   declare_parameter("odom_topic", "odom");
   declare_parameter("rotation_angular_tolerance", 0.05);
+  declare_parameter("dynamic_docking_enabled", false);
+  declare_parameter("dynamic_docking_x_error_threshold", 0.05);
+  declare_parameter("dynamic_docking_y_error_threshold", 0.05);
+  declare_parameter("dynamic_docking_yaw_error_threshold", 10.0);
 }
 
 nav2_util::CallbackReturn
@@ -63,6 +67,10 @@ DockingServer::on_configure(const rclcpp_lifecycle::State & state)
   get_parameter("fixed_frame", fixed_frame_);
   get_parameter("dock_prestaging_tolerance", dock_prestaging_tolerance_);
   get_parameter("rotation_angular_tolerance", rotation_angular_tolerance_);
+  get_parameter("dynamic_docking_enabled", dynamic_docking_enabled_);
+  get_parameter("dynamic_docking_x_error_threshold", dynamic_docking_x_error_threshold_);
+  get_parameter("dynamic_docking_y_error_threshold", dynamic_docking_y_error_threshold_);
+  get_parameter("dynamic_docking_yaw_error_threshold", dynamic_docking_yaw_error_threshold_);
 
   RCLCPP_INFO(get_logger(), "Controller frequency set to %.4fHz", controller_frequency_);
 
@@ -266,7 +274,10 @@ void DockingServer::dockRobot()
     // Send robot to its staging pose
     publishDockingFeedback(DockRobot::Feedback::NAV_TO_STAGING_POSE);
     const auto initial_staging_pose = dock->getStagingPose();
-    const auto robot_pose = getRobotPoseInFrame(initial_staging_pose.header.frame_id);
+    staging_x_offset_ = getStagingXOffset(dock->pose, initial_staging_pose);
+    staging_yaw_offset_ = getStagingYawOffset(dock->pose, initial_staging_pose); 
+    auto recovery_staging_pose = initial_staging_pose;
+    auto robot_pose = getRobotPoseInFrame(initial_staging_pose.header.frame_id);
     if (!goal->navigate_to_staging_pose ||
       utils::l2Norm(robot_pose.pose, initial_staging_pose.pose) < dock_prestaging_tolerance_)
     {
@@ -292,6 +303,43 @@ void DockingServer::dockRobot()
     doInitialPerception(dock, dock_pose);
     RCLCPP_INFO(get_logger(), "Successful initial dock detection");
 
+    if (dynamic_docking_enabled_) {
+      RCLCPP_INFO(get_logger(), "Dynamic docking is enabled, updating dock pose continuously");
+      while (rclcpp::ok())
+      {
+        // Stop if cancelled/preempted
+        if (checkAndWarnIfCancelled(docking_action_server_, "dock_robot") ||
+          checkAndWarnIfPreempted(docking_action_server_, "dock_robot"))
+        {
+          break;
+        }
+        // Calculate new staging pose based on updated dock position
+        doInitialPerception(dock, dock_pose);
+        if (validToDock(recovery_staging_pose, dock_pose)) {
+          break;
+        }
+        RCLCPP_WARN(get_logger(), "Dock moved out of range during initial perception, navigate to staging pose again");
+        
+        // Calculate new staging pose based on updated dock position
+        dock->pose = dock_pose.pose;
+        dock->frame = fixed_frame_;
+        recovery_staging_pose = dock->getStagingPose();
+
+        // Move to new staging dock pose
+        publishDockingFeedback(DockRobot::Feedback::NAV_TO_STAGING_POSE);
+        std::function<bool()> isPreempted = [this]() {
+            return checkAndWarnIfCancelled(docking_action_server_, "dock_robot") ||
+                  checkAndWarnIfPreempted(docking_action_server_, "dock_robot");
+          };
+
+        navigator_->goToPose(
+          recovery_staging_pose,
+          rclcpp::Duration::from_seconds(goal->max_staging_time),
+          isPreempted);
+        RCLCPP_INFO(get_logger(), "Successful navigation to new staging pose");
+      }
+    }
+
     // Get the direction of the movement
     bool dock_backward = dock_backwards_.has_value() ?
       dock_backwards_.value() :
@@ -314,7 +362,7 @@ void DockingServer::dockRobot()
           rotateToDock(dock_pose);
         }
         // Approach the dock using control law
-        if (approachDock(dock, dock_pose, dock_backward)) {
+        if (approachDock(dock, dock_pose, recovery_staging_pose, dock_backward)) {
           // We are docked, wait for charging to begin
           RCLCPP_INFO(
             get_logger(), "Made contact with dock, waiting for charge to start (if applicable).");
@@ -333,6 +381,47 @@ void DockingServer::dockRobot()
           }
         }
 
+        if (dynamic_docking_enabled_) {
+          bool continue_docking = false;
+          while (rclcpp::ok()) {
+            // Stop if cancelled/preempted
+            if (checkAndWarnIfCancelled(docking_action_server_, "dock_robot") ||
+              checkAndWarnIfPreempted(docking_action_server_, "dock_robot"))
+            {
+              break;
+            }
+            // Calculate new staging pose based on updated dock position
+            doInitialPerception(dock, dock_pose);
+            if (validToDock(recovery_staging_pose, dock_pose)) {
+              continue_docking = true;
+              break;
+            }
+            RCLCPP_WARN(get_logger(), "Dock moved out of range during approach, navigate to staging pose again");
+            // Calculate new staging pose based on updated dock position
+            dock->pose = dock_pose.pose;
+            dock->frame = fixed_frame_;
+            recovery_staging_pose = dock->getStagingPose();
+
+            publishDockingFeedback(DockRobot::Feedback::NAV_TO_STAGING_POSE);
+
+            // Move to new dock pose
+            std::function<bool()> isPreempted = [this]() {
+                return checkAndWarnIfCancelled(docking_action_server_, "dock_robot") ||
+                      checkAndWarnIfPreempted(docking_action_server_, "dock_robot");
+              };
+
+            navigator_->goToPose(
+              recovery_staging_pose,
+              rclcpp::Duration::from_seconds(goal->max_staging_time),
+              isPreempted);
+            RCLCPP_INFO(get_logger(), "Successful navigation to new staging pose");
+          }
+          if (continue_docking) {
+            continue;
+          }
+        }
+
+        
         // Cancelled, preempted, or shutting down (recoverable errors throw DockingException)
         stashDockData(goal->use_dock_id, dock, false);
         publishZeroVelocity();
@@ -482,7 +571,7 @@ void DockingServer::rotateToDock(const geometry_msgs::msg::PoseStamped & dock_po
 }
 
 bool DockingServer::approachDock(
-  Dock * dock, geometry_msgs::msg::PoseStamped & dock_pose, bool backward)
+  Dock * dock, geometry_msgs::msg::PoseStamped & dock_pose, geometry_msgs::msg::PoseStamped & initial_staging_pose, bool backward)
 {
   rclcpp::Rate loop_rate(controller_frequency_);
   auto start = this->now();
@@ -506,6 +595,13 @@ bool DockingServer::approachDock(
     // Update perception
     if (!dock->plugin->getRefinedPose(dock_pose, dock->id) && !dock->plugin->shouldRotateToDock()) {
       throw opennav_docking_core::FailedToDetectDock("Failed dock detection");
+    }
+
+    if (dynamic_docking_enabled_) {
+      if (!validToDock(initial_staging_pose, dock_pose)) {
+        RCLCPP_INFO(get_logger(), "Approach aborted, dock moved out of range, need to re-stage");
+        return false;
+      }
     }
 
     // Transform target_pose into base_link frame
@@ -646,6 +742,50 @@ bool DockingServer::getCommandToPose(
 
   // Command is valid, but target is not reached
   return false;
+}
+
+bool DockingServer::validToDock(
+  const geometry_msgs::msg::PoseStamped & recovery_staging_pose,
+  const geometry_msgs::msg::PoseStamped & dock_pose)
+{
+  const double yaw = tf2::getYaw(dock_pose.pose.orientation);
+  geometry_msgs::msg::PoseStamped no_err_staging_pose = dock_pose;
+  no_err_staging_pose.pose.position.x += cos(yaw) * staging_x_offset_;
+  no_err_staging_pose.pose.position.y += sin(yaw) * staging_x_offset_;
+
+  tf2::Quaternion orientation;
+  orientation.setEuler(0.0, 0.0, yaw + staging_yaw_offset_);
+  no_err_staging_pose.pose.orientation = tf2::toMsg(orientation);
+
+  return !(abs(no_err_staging_pose.pose.position.x - recovery_staging_pose.pose.position.x) >= dynamic_docking_x_error_threshold_ ||
+          abs(no_err_staging_pose.pose.position.y - recovery_staging_pose.pose.position.y) >= dynamic_docking_y_error_threshold_||
+          abs(tf2::getYaw(no_err_staging_pose.pose.orientation) - tf2::getYaw(recovery_staging_pose.pose.orientation)) >= angles::from_degrees(dynamic_docking_yaw_error_threshold_));
+}
+
+float DockingServer::getStagingXOffset(
+    const geometry_msgs::msg::Pose & dock_pose,
+    const geometry_msgs::msg::PoseStamped & staging_pose)
+{
+  // Calculate the x offset in the dock frame
+  const double yaw = tf2::getYaw(dock_pose.orientation);
+
+  const double dx = staging_pose.pose.position.x - dock_pose.position.x;
+  const double dy = staging_pose.pose.position.y - dock_pose.position.y;
+
+  // Project (dx,dy) onto forward direction (cos(yaw), sin(yaw))
+  const double x_offset = dx * std::cos(yaw) + dy * std::sin(yaw);
+  return x_offset;
+}
+
+float DockingServer::getStagingYawOffset(
+    const geometry_msgs::msg::Pose & dock_pose,
+    const geometry_msgs::msg::PoseStamped & staging_pose)
+{
+  // Calculate the yaw offset in the dock frame
+  const double yaw_pose = tf2::getYaw(dock_pose.orientation);
+  const double yaw_staging = tf2::getYaw(staging_pose.pose.orientation);
+
+  return angles::normalize_angle(yaw_staging - yaw_pose);
 }
 
 void DockingServer::undockRobot()

@@ -93,7 +93,7 @@ public:
    * @returns True if dock successfully approached, False if cancelled. For
    *          any internal error, will throw.
    */
-  bool approachDock(Dock * dock, geometry_msgs::msg::PoseStamped & dock_pose, bool backward);
+  bool approachDock(Dock * dock, geometry_msgs::msg::PoseStamped & dock_pose, geometry_msgs::msg::PoseStamped & initial_staging_pose, bool backward);
 
   /**
    * @brief Perform a pure rotation to dock orientation.
@@ -129,6 +129,18 @@ public:
   bool getCommandToPose(
     geometry_msgs::msg::Twist & cmd, const geometry_msgs::msg::PoseStamped & pose,
     double linear_tolerance, double angular_tolerance, bool is_docking, bool backward);
+
+  bool validToDock(
+    const geometry_msgs::msg::PoseStamped & recovery_staging_pose,
+    const geometry_msgs::msg::PoseStamped & dock_pose);
+
+  float getStagingXOffset(
+    const geometry_msgs::msg::Pose & dock_pose,
+    const geometry_msgs::msg::PoseStamped & staging_pose);
+
+  float getStagingYawOffset(
+    const geometry_msgs::msg::Pose & dock_pose,
+    const geometry_msgs::msg::PoseStamped & staging_pose);
 
   /**
    * @brief Get the robot pose (aka base_frame pose) in another frame.
@@ -259,6 +271,17 @@ protected:
   double dock_prestaging_tolerance_;
   // Angular tolerance to exit the rotation loop when rotate_to_dock is enabled
   double rotation_angular_tolerance_;
+  // Whether dynamic docking is enabled
+  bool dynamic_docking_enabled_;
+  // Dynamic docking distance error threshold
+  double dynamic_docking_x_error_threshold_;
+  double dynamic_docking_y_error_threshold_;
+  double dynamic_docking_yaw_error_threshold_;
+
+  // staging x offset
+  double staging_x_offset_;
+  // staging yaw offset
+  double staging_yaw_offset_;
 
   // This is a class member so it can be accessed in publish feedback
   rclcpp::Time action_start_time_;
